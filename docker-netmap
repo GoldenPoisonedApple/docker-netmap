@@ -144,11 +144,28 @@ show_netmap() {
 	# <(): プロセス置換: プロセスの出力をファイルであるかのように置き換える
 	# < <(): 入力リダイレクトで、<()の中身を標準入力として読み込む、一般的なパターン
   done < <(docker ps -a --format '{{.Names}}{{"\t"}}{{.Ports}}{{"\t"}}{{.Status}}')
+	# --------------------------------
+
+	# 表示用変数
+	# -a: array: インデックス配列
+	local -a net_names=() net_drivers=() net_scopes=()
+	# container_net_idx: 例: [0, 0, 0, 1, 2, 2], 1つ目のnetにはcontainer3つ, 2つ目のnetにはcontainer1つ, 3つ目のnetにはcontainer2つ接続している
+	local -a container_net_idx=() container_branch=() container_labels=() container_ports=() container_status=() container_dns=()
+
 
 	# ----- 各ネットワークの情報を取得、表示 -----
   while IFS=$'\t' read -r net driver scope; do
 		# 空行の場合はスキップ
     [[ -z "$net" ]] && continue
+
+		# 処理しているネットワークのインデックス, net_names+=("$net")されていくのでインクリメントされていく
+		local idx=${#net_names[@]}
+		# ----- 表示用変数に追加 -----
+		# (): 配列, +=("$net"): "$net"を要素とする配列を追加する
+    net_names+=("$net")
+    net_drivers+=("$driver")
+    net_scopes+=("$scope")
+		# --------------------------
 
 		# ----- ネットワークに接続されているコンテナの情報を取得 -----
 		# mapfile: 標準入力を一行ずつ読んで配列に格納, -t: trim: 各行末の改行\nを削除, 今回は containers に格納
@@ -157,9 +174,10 @@ show_netmap() {
     mapfile -t containers < <(docker network inspect "$net" --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' \
         | sed '/^$/d' | LC_ALL=C sort
     )
+		# -------------------------------------------------------
 
-		# ネットワーク名, ドライバー, スコープを表示
-    printf '%s %s %s\n' "$net" "$driver" "$scope"
+		# コンテナが無い場合はスキップ
+		[[ ${#containers[@]} -eq 0 ]] && continue
 
 		# ----- ネットワークに接続されているコンテナの情報を表示 -----
 		# containers[@]: 配列の全要素を参照
@@ -171,8 +189,8 @@ show_netmap() {
 			# $(()): 算術展開: 整数の式として評価, 結果を文字列として展開
       i=$((i + 1))
       local branch='├'
-			# i == nなら└
-      (( i == n )) && branch='└'
+      (( i == n )) && branch='└'	# i == nなら└
+
       local ports="${c_ports[$container]:-"-"}"
       local status="${c_status[$container]:-"not running"}"
 			# +: パラメータが設定されていれば右側の値を返す、されていなければ空文字を返す
@@ -186,14 +204,68 @@ show_netmap() {
 			# 関数の結果(標準出力)をコマンド置換(文字列)で受け取り、dns に代入
       dns=$(inspect_dns_for_net "$container" "$net")
       dns=${dns:-"-"}
+			# ----------------------
 
-			# ----- 表示 ----- 
-      # 列がずれないよう、PORTS はスペースを含むのでそのまま（必要なら後で -f/--no-trunc 等）
-      printf '%s%s %s %s %s\n' "$branch" "$container" "$ports" "$status" "$dns"
+			# ----- 表示用変数に追加 ----- 
+			container_net_idx+=("$idx")
+			container_branch+=("$branch")
+			container_labels+=("$container")
+			container_ports+=("$ports")
+			container_status+=("$status")
+			container_dns+=("$dns")
+			# --------------------------
     done
-    printf '\n'
 	
   done < <(docker network ls --format '{{.Name}}{{"\t"}}{{.Driver}}{{"\t"}}{{.Scope}}')
+	# ---------------------------------------------------------
+
+	# ネットワークがない場合は終了
+	[[ ${#net_names[@]} -eq 0 ]] && return 0
+
+	# ----- 表示用変数の最大幅を取得 -----
+	local w_net=0 w_drv=0 w_scope=0 w_label=0 w_ports=0 w_status=0 w_dns=0
+	local s
+  for s in "${net_names[@]}";   do (( ${#s} > w_net   )) && w_net=${#s};   done
+  for s in "${net_drivers[@]}"; do (( ${#s} > w_drv   )) && w_drv=${#s};   done
+  for s in "${net_scopes[@]}";  do (( ${#s} > w_scope )) && w_scope=${#s};  done
+  for s in "${container_labels[@]}";  do (( ${#s} > w_label  )) && w_label=${#s};  done
+  for s in "${container_ports[@]}";   do (( ${#s} > w_ports  )) && w_ports=${#s};  done
+  for s in "${container_status[@]}";  do (( ${#s} > w_status )) && w_status=${#s}; done
+  for s in "${container_dns[@]}";     do (( ${#s} > w_dns    )) && w_dns=${#s};    done
+	# ---------------------------------
+
+	# ----- 表示 -----
+	# header
+	printf '%-*s  %-*s  %-*s\n' "$w_net" "NETWORK" "$w_drv" "DRIVER" "$w_scope" "SCOPE"
+	printf '%s %-*s  %-*s  %-*s  %-*s\n' "└" "$w_label" "CONTAINER" "$w_ports" "PORTS" "$w_status" "STATUS" "$w_dns" "DNS"
+  
+	local net_idx
+	local container_idx=0	# コンテナ表示用インデックス
+	# !: index: インデックス, ${!net_names[@]}: net_names配列のインデックスを展開
+  for net_idx in "${!net_names[@]}"; do
+		# ネットワーク表示
+    printf '%-*s  %-*s  %-*s\n' \
+		"$w_net" "${net_names[$net_idx]}" \
+		"$w_drv" "${net_drivers[$net_idx]}" \
+		"$w_scope" "${net_scopes[$net_idx]}"
+    
+		# そのネットワークのコンテナ表示
+		local has_container=0
+		while (( container_idx < ${#container_net_idx[@]} )) && [[ ${container_net_idx[$container_idx]} -eq $net_idx ]]; do
+      printf '%s %-*s  %-*s  %-*s  %s\n' \
+        "${container_branch[$container_idx]}" \
+        "$w_label" "${container_labels[$container_idx]}" \
+        "$w_ports" "${container_ports[$container_idx]}" \
+        "$w_status" "${container_status[$container_idx]}" \
+        "${container_dns[$container_idx]}"
+
+			has_container=1
+      container_idx=$((container_idx + 1))
+    done
+    if (( has_container )); then
+      printf '\n'
+    fi
+  done
 }
 
 show_netmap
