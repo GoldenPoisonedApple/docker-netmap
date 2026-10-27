@@ -136,6 +136,7 @@ load_docker_ps() {
 # 引数: 
 # $1: コンテナ名配列参照(only read)
 # $2: dns連想配列参照(key: network|container)
+# $3: コンテナ連想配列参照(key: network, value: コンテナ名群(/t区切り))
 load_docker_inspect() {
 	local -n ref_containers="$1"
 	local -n ref_container_dns="$2"
@@ -195,6 +196,74 @@ load_docker_network_ls() {
   done < <(docker network ls --format '{{.Name}}{{"\t"}}{{.Driver}}{{"\t"}}{{.Scope}}')
 }
 
+# 表示順を決める
+# 参加コンテナが無いネットワークを先、あるものを後にする
+# 各群の相対順は docker network ls のまま残す
+# $1: ネットワーク名配列参照(only read)
+# $2: コンテナ連想配列参照(key: network, value: コンテナ名群(/t区切り))(only read)
+# $3: 表示順を整理したネットワーク名配列参照
+order_networks_empty_first() {
+	local -n ref_network_names="$1"
+	local -n ref_network_containers="$2"
+	local -n ref_ordered="$3"
+
+	# 空のネットワークと参加コンテナがあるネットワークに分別
+	local -a empty=() occupied=()
+	local name
+	for name in "${ref_network_names[@]}"; do
+		if [[ -z "${ref_network_containers[$name]:-}" ]]; then
+			empty+=("$name")
+		else
+			occupied+=("$name")
+		fi
+	done
+
+	# 合成
+	ref_ordered=()
+	if ((${#empty[@]} > 0)); then
+		ref_ordered+=("${empty[@]}")
+	fi
+	if ((${#occupied[@]} > 0)); then
+		ref_ordered+=("${occupied[@]}")
+	fi
+}
+
+# 所属数と、そのうち Status が Up で始まる数を数える
+# $1: ネットワーク名
+# $2: コンテナ連想配列参照(key: network, value: コンテナ名群(/t区切り))(only read)
+# $3: ステータス連想配列参照(key: container)(only read)
+# $4: up参照
+# $5: total参照
+count_network_members() {
+	local network_name="$1"
+	local -n ref_network_containers="$2"
+	local -n ref_container_status="$3"
+	local -n ref_up="$4"
+	local -n ref_total="$5"
+
+	# そのネットワークに所属するコンテナ名群取得
+	local members="${ref_network_containers[$network_name]:-}"
+	ref_up=0
+	ref_total=0
+
+	# 所属コンテナが無い場合は終了
+	[[ -z "$members" ]] && return 0
+
+	local -a names=()
+	IFS=$'\t' read -ra names <<< "$members"
+
+	local name status
+	ref_total=${#names[@]}
+	for name in "${names[@]}"; do
+		[[ -z "$name" ]] && continue
+		status="${ref_container_status[$name]:-}"
+		# Up で始まるステータスの場合は up に加算
+		if [[ "$status" == Up* ]]; then
+			ref_up=$((ref_up + 1))
+		fi
+	done
+}
+
 show_netmap() {
 	# ----- 情報取得 -----
 	# コンテナ情報, -a: array: インデックス配列
@@ -225,30 +294,41 @@ show_netmap() {
 	[[ ${#network_names[@]} -eq 0 ]] && return 0
 
 	# ----- 表示用変数の最大幅を取得 -----
-	local w_net=0 w_drv=0 w_scope=0 w_container=0 w_ports=0 w_status=0
+	local w_net_container=0 w_drv_port=0 w_scope_status=0
 	local s
-  for s in "${network_names[@]}";   do (( ${#s} > w_net   )) && w_net=${#s};   done
-  for s in "${network_drivers[@]}"; do (( ${#s} > w_drv   )) && w_drv=${#s};   done
-  for s in "${network_scopes[@]}";  do (( ${#s} > w_scope )) && w_scope=${#s};  done
-  for s in "${container_names[@]}";  do (( ${#s} > w_container  )) && w_container=${#s};  done
-  for s in "${container_ports[@]}";   do (( ${#s} > w_ports  )) && w_ports=${#s};  done
-  for s in "${container_status[@]}";  do (( ${#s} > w_status )) && w_status=${#s}; done
+  for s in "${network_names[@]}";   do (( ${#s} > w_net_container )) && w_net_container=${#s};   done
+  for s in "${container_names[@]}";  do (( ${#s} > w_net_container )) && w_net_container=${#s};   done	
+  for s in "${network_drivers[@]}"; do (( ${#s} > w_drv_port   )) && w_drv_port=${#s};   done
+  for s in "${container_ports[@]}";   do (( ${#s} > w_drv_port  )) && w_drv_port=${#s};  done
+  for s in "${network_scopes[@]}";  do (( ${#s} > w_scope_status )) && w_scope_status=${#s};  done
+  for s in "${container_status[@]}";  do (( ${#s} > w_scope_status )) && w_scope_status=${#s}; done
 	# ---------------------------------
+
+	# 整列
+	local -a ordered_networks=()
+	order_networks_empty_first network_names network_containers ordered_networks
 
 	# ------------- 表示 ---------------
 	# header
-	printf '%-*s  %-*s  %-*s\n' "$w_net" "NETWORK" "$w_drv" "DRIVER" "$w_scope" "SCOPE"
-	printf '%s %-*s  %-*s  %-*s  %s\n' "└" "$w_container" "CONTAINER" "$w_ports" "PORTS" "$w_status" "STATUS" "DNS"
+	printf '%-*s  %-*s  %-*s  %s\n' "$(( w_net_container + 2 ))" "NETWORK" "$w_drv_port" "DRIVER" "$w_scope_status" "SCOPE" "UP/TOTAL"
+	printf '%-*s  %-*s  %-*s  %s\n\n' "$(( w_net_container + 2 ))" "CONTAINER" "$w_drv_port" "PORTS" "$w_scope_status" "STATUS" "DNS"
   
-	for network in "${network_names[@]}"; do
+	for network in "${ordered_networks[@]}"; do
+		# ネットワークの参加コンテナ数と Up の数を取得
+		local up=0 total=0
+		count_network_members "$network" network_containers container_status up total
+		local summary=""
+		(( $total > 0 )) && summary="${up}/${total} up"
 		# ネットワーク表示
-		printf '%-*s  %-*s  %-*s\n' \
-			"$w_net" "$network" \
-			"$w_drv" "${network_drivers[$network]}" \
-			"$w_scope" "${network_scopes[$network]}"
+		printf '%-*s  %-*s  %-*s  %s\n' \
+			"$(( w_net_container + 2 ))" "$network" \
+			"$w_drv_port" "${network_drivers[$network]}" \
+			"$w_scope_status" "${network_scopes[$network]}" \
+			"$summary"
 
 		# そのネットワークのコンテナ表示
 		# -a: assign words to array: 分割した単語を配列に代入
+		local has_container=0
 		while IFS=$'\t' read -ra containers; do
 			for container in "${containers[@]}"; do
 				local branch="├"
@@ -258,12 +338,17 @@ show_netmap() {
 				# コンテナ表示
 				printf '%s %-*s  %-*s  %-*s  %s\n' \
 					"$branch" \
-					"$w_container" "$container" \
-					"$w_ports" "${container_ports[$container]:-}" \
-					"$w_status" "${container_status[$container]:-}" \
+					"$w_net_container" "$container" \
+					"$w_drv_port" "${container_ports[$container]:-"-"}" \
+					"$w_scope_status" "${container_status[$container]:-}" \
 					"${container_dns["${network}|${container}"]:-}"
+
+				has_container=1
 			done
 		done  <<< "${network_containers[$network]:-}"
+		# コンテナが無い場合は改行しない
+		(( $has_container )) && printf '\n'
+
 	done
 }
 
