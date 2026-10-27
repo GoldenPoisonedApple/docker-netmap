@@ -6,12 +6,12 @@
 set -euo pipefail
 
 # ------------------ Metadata ------------------
-
-SCHEMA_VERSION="0.1.0"
+# 以下のコメントがあるとrelease-please で自動的に更新される
+VERSION="0.1.0" # x-release-please-version
+SCHEMA_VERSION="0.1.0" # x-release-please-version
 VENDOR="tipsy"
-VERSION="0.0.1"
 SHORT_DESCRIPTION="Docker network map"
-URL=""
+URL="https://github.com/GoldenPoisonedApple/docker-netmap"
 
 # Docker info で表示されるメタデータ
 print_metadata() {
