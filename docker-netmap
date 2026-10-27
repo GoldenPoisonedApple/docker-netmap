@@ -5,22 +5,196 @@
 # -o pipefail: option pipefail: パイプライン全体の終了コードが、途中で失敗したコマンドの終了コードとなる。デフォルトは最後のコマンドの終了コード
 set -euo pipefail
 
+# ------------------ Metadata ------------------
+
 SCHEMA_VERSION="0.1.0"
 VENDOR="tipsy"
 VERSION="0.0.1"
 SHORT_DESCRIPTION="Docker network map"
 URL=""
 
-# ./script.sh start をすると $1 = start となる
-# ${1:-}: -: デフォルト値に空文字列を指定 -u指定のため未指定時でもちゃんと動くように
-case "${1:-}" in
-  docker-cli-plugin-metadata)
-		# 'EOF': ''によって中身が展開されない
+# Docker info で表示されるメタデータ
+print_metadata() {
     cat <<EOF
 {"SchemaVersion":"${SCHEMA_VERSION}","Vendor":"${VENDOR}","Version":"${VERSION}","ShortDescription":"${SHORT_DESCRIPTION}","URL":"${URL}"}
 EOF
-    ;; # caseの終わり
-  *)
-    echo "test"
-    ;;
-esac
+}
+
+# Docker 登録用
+# ./script.sh start をすると $1 = start となる
+# ${1:-}: -: デフォルト値に空文字列を指定 -u指定のため未指定時でもちゃんと動くように
+if [[ "${1:-}" == "docker-cli-plugin-metadata" ]]; then
+  print_metadata
+	# 成功終了
+  exit 0
+fi
+
+# ------------------ Prepare ------------------
+
+# Docker が付ける先頭のプラグイン名を除去
+if [[ "${1:-}" == "netmap" ]]; then
+  shift
+fi
+
+# ------------------ Options ------------------
+# help
+show_usage() {
+  cat <<EOF
+${SHORT_DESCRIPTION}
+Usage:  docker netmap [OPTIONS]
+Options:
+  -h, --help       Print this help message
+  -V, --version    Print plugin version
+
+Examples:
+  docker netmap
+  docker netmap --help
+EOF
+}
+
+show_version() {
+  printf 'docker-netmap %s (%s)\n' "${VERSION}" "${VENDOR}"
+}
+
+# オプション解析
+# $#: 渡された引数の数
+# -gt: >
+# = 引数が0より大きい場合
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      show_usage
+      exit 0
+      ;;
+    -V|--version)
+      show_version
+      exit 0
+      ;;
+    --)
+			# shift: 引数を1つ消費する, $1が消費され$#が1減る
+      shift
+      break
+      ;;
+    -*)
+			# >&2: 標準エラー出力にリダイレクト
+      printf 'docker-netmap: unknown option: %s\n' "$1" >&2
+      printf 'try `docker netmap --help` for more information.\n' >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+  shift
+done
+
+# ------------------ Subcommands ------------------
+
+# サブコマンドがある場合
+# 現在はサブコマンド未実装
+if [[ $# -gt 0 ]]; then
+	printf 'docker-netmap: unknown command: %s\n' "$1" >&2
+	printf 'try `docker netmap --help` for more information.\n' >&2
+	exit 1
+fi
+
+# ------------------ Main ------------------
+
+# docker ps --format '{{.Names}}' | while read c; do
+#   echo "$c:"
+#   docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{println "  " $k}}{{end}}' "$c"
+# done
+
+# 対象コンテナにおいて対象のネットワーク名におけるDNS名を取得
+# 引数: コンテナ名, ネットワーク名
+# 戻り値: DNS名
+# 失敗してもエラーを出さずに空文字を返す
+inspect_dns_for_net() {
+	# $1, $2: 引数
+  local container="$1" net="$2"
+	# エスケープ: Go templateの構文に埋め込む時に構文エラーにならないように
+	# ${変数//検索時文字列//置換文字列}: //: global replacement: すべて置換、\ を \\ に置換
+  local net_escaped=${net//\\/\\\\}
+	# " を \" に置換
+  net_escaped=${net_escaped//\"/\\\"}
+	# 対象コンテナにおいて対象のネットワーク名のDNS名を取得, DNS名がなければAliasesを取得
+	# $k: key: ネットワーク名, $v: value: ネットワーク設定
+	# 2>/dev/null: 標準エラー出力を/dev/nullにリダイレクト, true: エラーが発生してもエラーを出さずに空文字を返す
+  docker inspect -f \
+		'{{range $k, $v := .NetworkSettings.Networks}}{{if eq $k "'"${net_escaped}"'"}}{{if $v.DNSNames}}{{join $v.DNSNames ","}}{{else if $v.Aliases}}{{join $v.Aliases ","}}{{end}}{{end}}{{end}}' \
+    "$container" 2>/dev/null || true
+}
+show_netmap() {
+  # key: コンテナ名, value: PORTS の連想配列
+  declare -A c_ports=()
+	# key: コンテナ名, value: STATUS の連想配列
+	declare -A c_status=()
+
+	# ----- 各コンテナの情報を取得 -----
+	# read: 標準入力から1行読み込み変数へ代入, -r: raw: そのまま読み込む \ 等のエスケープを無視
+	# IFS: Input Field Separator: readがどこで分割するかを指定, $'\t': タブ
+	# > 標準入力から1行ずつ、タブで分割してname, ports, statusに代入
+  while IFS=$'\t' read -r name ports status; do
+		# 空行の場合はスキップ
+		# "$name" のように""で囲むことで、名前にスペースが含まれていてもに扱える
+    [[ -z "$name" ]] && continue
+    c_ports["$name"]="$ports"
+    c_status["$name"]="$status"
+	
+	# <(): プロセス置換: プロセスの出力をファイルであるかのように置き換える
+	# < <(): 入力リダイレクトで、<()の中身を標準入力として読み込む、一般的なパターン
+  done < <(docker ps -a --format '{{.Names}}{{"\t"}}{{.Ports}}{{"\t"}}{{.Status}}')
+
+	# ----- 各ネットワークの情報を取得、表示 -----
+  while IFS=$'\t' read -r net driver scope; do
+		# 空行の場合はスキップ
+    [[ -z "$net" ]] && continue
+
+		# ----- ネットワークに接続されているコンテナの情報を取得 -----
+		# mapfile: 標準入力を一行ずつ読んで配列に格納, -t: trim: 各行末の改行\nを削除, 今回は containers に格納
+		# sed: stream editor: ^$: 空行, /d: 削除 -> 空行を削除
+		# sort: 行をソート, LC_ALL=C: localeをCに設定することでASCII順にソート
+    mapfile -t containers < <(docker network inspect "$net" --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' \
+        | sed '/^$/d' | LC_ALL=C sort
+    )
+
+		# ネットワーク名, ドライバー, スコープを表示
+    printf '%s %s %s\n' "$net" "$driver" "$scope"
+
+		# ----- ネットワークに接続されているコンテナの情報を表示 -----
+		# containers[@]: 配列の全要素を参照
+		# #: length
+		# ${#containers[@]}: containers配列の要素数を取得
+    local n=${#containers[@]}
+		local i=0
+    for container in "${containers[@]}"; do
+			# $(()): 算術展開: 整数の式として評価, 結果を文字列として展開
+      i=$((i + 1))
+      local branch='├'
+			# i == nなら└
+      (( i == n )) && branch='└'
+      local ports="${c_ports[$container]:-"-"}"
+      local status="${c_status[$container]:-"not running"}"
+			# +: パラメータが設定されていれば右側の値を返す、されていなければ空文字を返す
+			# -z: 文字列が空なら真
+			# -> ポートが設定されていなければ - を表示
+      [[ -z "${c_ports[$container]+x}" ]] && ports="-"
+
+			# ----- DNS名を取得 -----
+      local dns
+			# $container, $net: 引数
+			# 関数の結果(標準出力)をコマンド置換(文字列)で受け取り、dns に代入
+      dns=$(inspect_dns_for_net "$container" "$net")
+      dns=${dns:-"-"}
+
+			# ----- 表示 ----- 
+      # 列がずれないよう、PORTS はスペースを含むのでそのまま（必要なら後で -f/--no-trunc 等）
+      printf '%s%s %s %s %s\n' "$branch" "$container" "$ports" "$status" "$dns"
+    done
+    printf '\n'
+	
+  done < <(docker network ls --format '{{.Name}}{{"\t"}}{{.Driver}}{{"\t"}}{{.Scope}}')
+}
+
+show_netmap
+

@@ -9,9 +9,15 @@ deploy:
 	chmod +x $(PLUGIN_PATH)/$(PLUGIN_FILE)
 	echo "----- deploy success -----"
 
+.PHONY: uninstall
 uninstall:
 	rm $(PLUGIN_PATH)/$(PLUGIN_FILE)
 	echo "----- uninstall success -----"
 
+.PHONY: info
 info:
 	docker info
+
+.PHONY: run
+run:
+	docker netmap
