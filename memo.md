@@ -10,6 +10,9 @@ nano docker-netmap
 sudo chmod +x docker-netmap 
 ```
 
+```bash
+docker ps --format '{{.Names}}' | while read c; do   echo "$c:"; docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{println "  " $k}}{{end}}' "$c"; done
+```
 
 
 [CLIプラグインドキュメントが消えたのですか?号 #10852 ·docker/docs](https://github.com/docker/docs/issues/10852)

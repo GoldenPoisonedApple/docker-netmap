@@ -100,172 +100,171 @@ fi
 
 # ------------------ Main ------------------
 
-# docker ps --format '{{.Names}}' | while read c; do
-#   echo "$c:"
-#   docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{println "  " $k}}{{end}}' "$c"
-# done
+# コンテナ情報取得
+# 引数: 
+# $1: コンテナ名配列参照
+# $2: ポート連想配列参照(key: container)
+# $3: ステータス連想配列参照(key: container)
+load_docker_ps() {
+	# -n: nameref: 変数名の参照
+	# $1, $2, $3: 引数名を参照して、そこに値を代入
+	# -> returnが無いためこれで値を返す
+	local -n ref_container_names="$1"
+	local -n ref_container_ports="$2"
+	local -n ref_container_status="$3"
 
-# 対象コンテナにおいて対象のネットワーク名におけるDNS名を取得
-# 引数: コンテナ名, ネットワーク名
-# 戻り値: DNS名
-# 失敗してもエラーを出さずに空文字を返す
-inspect_dns_for_net() {
-	# $1, $2: 引数
-  local container="$1" net="$2"
-	# エスケープ: Go templateの構文に埋め込む時に構文エラーにならないように
-	# ${変数//検索時文字列//置換文字列}: //: global replacement: すべて置換、\ を \\ に置換
-  local net_escaped=${net//\\/\\\\}
-	# " を \" に置換
-  net_escaped=${net_escaped//\"/\\\"}
-	# 対象コンテナにおいて対象のネットワーク名のDNS名を取得, DNS名がなければAliasesを取得
-	# $k: key: ネットワーク名, $v: value: ネットワーク設定
-	# 2>/dev/null: 標準エラー出力を/dev/nullにリダイレクト, true: エラーが発生してもエラーを出さずに空文字を返す
-  docker inspect -f \
-		'{{range $k, $v := .NetworkSettings.Networks}}{{if eq $k "'"${net_escaped}"'"}}{{if $v.DNSNames}}{{join $v.DNSNames ","}}{{else if $v.Aliases}}{{join $v.Aliases ","}}{{end}}{{end}}{{end}}' \
-    "$container" 2>/dev/null || true
-}
-show_netmap() {
-  # key: コンテナ名, value: PORTS の連想配列
-  declare -A c_ports=()
-	# key: コンテナ名, value: STATUS の連想配列
-	declare -A c_status=()
-
-	# ----- 各コンテナの情報を取得 -----
+	# 標準入力から1行ずつ、タブで分割してname, ports, statusに代入
 	# read: 標準入力から1行読み込み変数へ代入, -r: raw: そのまま読み込む \ 等のエスケープを無視
 	# IFS: Input Field Separator: readがどこで分割するかを指定, $'\t': タブ
-	# > 標準入力から1行ずつ、タブで分割してname, ports, statusに代入
-  while IFS=$'\t' read -r name ports status; do
-		# 空行の場合はスキップ
+	while IFS=$'\x1f' read -r name ports status; do
+		# -z: 文字列が空
+		# -> 空行の場合はスキップ
 		# "$name" のように""で囲むことで、名前にスペースが含まれていてもに扱える
-    [[ -z "$name" ]] && continue
-    c_ports["$name"]="$ports"
-    c_status["$name"]="$status"
-	
+		[[ -z "$name" ]] && continue
+
+		# (): 配列, +=("$net"): "$net"を要素とする配列を追加する
+		ref_container_names+=("$name")
+		ref_container_ports["$name"]="$ports"
+		ref_container_status["$name"]="$status"
+
 	# <(): プロセス置換: プロセスの出力をファイルであるかのように置き換える
 	# < <(): 入力リダイレクトで、<()の中身を標準入力として読み込む、一般的なパターン
-  done < <(docker ps -a --format '{{.Names}}{{"\t"}}{{.Ports}}{{"\t"}}{{.Status}}')
+	done < <(docker ps -a --format '{{.Names}}{{"\x1f"}}{{.Ports}}{{"\x1f"}}{{.Status}}')
+}
+
+# コンテナ詳細情報取得
+# 引数: 
+# $1: コンテナ名配列参照(only read)
+# $2: dns連想配列参照(key: network|container)
+load_docker_inspect() {
+	local -n ref_containers="$1"
+	local -n ref_container_dns="$2"
+	local -n ref_network_containers="$3"
+
+	# コンテナが無い場合は終了
+	# containers[@]: 配列の全要素を参照
+	# #: 長さ
+	# ${#containers[@]}: containers配列の要素数を取得
+	[[ ${#ref_containers[@]} -eq 0 ]] && return 0
+
+	# コンテナ詳細情報取得
+  local name net dns_val
+  while IFS=$'\t' read -r name net dns_val; do
+		# コンテナ名もしくはネットワーク名が空の場合はスキップ
+    [[ -z "$name" || -z "$net" ]] && continue
+		
+		# #/: 先頭の/を削除: inspectではコンテナ名が/で始まる
+    name="${name#/}"
+		# dns追加
+    ref_container_dns["${net}|${name}"]="${dns_val}"
+
+		# ネットワークに所属するコンテナ追加 タブ区切りで積む
+		if [[ -z "${ref_network_containers[$net]:-}" ]]; then
+			ref_network_containers["$net"]="${name}"
+		else
+			ref_network_containers["$net"]+=$'\t'"${name}"
+		fi
+
+	# 対象コンテナにおいて対象のネットワーク名のDNS名を取得, DNS名がなければAliasesを取得
+	# $k: key: ネットワーク名, $v: value: ネットワーク設定
+  done < <(
+    docker inspect --format \
+      '{{range $k,$v := .NetworkSettings.Networks}}{{$.Name}}{{"\t"}}{{$k}}{{"\t"}}{{if $v.DNSNames}}{{join $v.DNSNames ","}}{{else if $v.Aliases}}{{join $v.Aliases ","}}{{end}}{{"\n"}}{{end}}' \
+      "${ref_containers[@]}"
+  )
+}
+
+# ネットワーク情報取得
+# 引数: 
+# $1: ネットワーク名配列参照
+# $2: ドライバー連想配列参照(key: network)
+# $3: スコープ連想配列参照(key: network)
+load_docker_network_ls() {
+	local -n ref_network_names="$1"
+	local -n ref_network_drivers="$2"
+	local -n ref_network_scopes="$3"
+
+	while IFS=$'\t' read -r net driver scope; do
+		# 空行の場合はスキップ
+		[[ -z "$net" ]] && continue
+
+		# ネットワーク名配列に追加
+		ref_network_names+=("$net")
+		ref_network_drivers["$net"]="$driver"
+		ref_network_scopes["$net"]="$scope"
+  done < <(docker network ls --format '{{.Name}}{{"\t"}}{{.Driver}}{{"\t"}}{{.Scope}}')
+}
+
+show_netmap() {
+	# ----- 情報取得 -----
+	# コンテナ情報, -a: array: インデックス配列
+	local -a container_names=()
+	# -A: associative array: 連想配列, key: container
+	local -A container_ports=() container_status=()
+
+	# network_containers: key: network, value: コンテナ名群(/t区切り)
+	local -A network_containers=()
+
+	# ネットワーク情報
+	local -a network_names=()
+	# key: ネットワーク名
+	local -A network_drivers=() network_scopes=()
+
+	# dns情報 key: network|container
+	local -A container_dns=()
+
+	# コンテナ情報取得
+	load_docker_ps container_names container_ports container_status
+	# コンテナ詳細情報取得
+	load_docker_inspect container_names container_dns network_containers
+	# ネットワーク情報取得
+	load_docker_network_ls network_names network_drivers network_scopes
 	# --------------------------------
 
-	# 表示用変数
-	# -a: array: インデックス配列
-	local -a net_names=() net_drivers=() net_scopes=()
-	# container_net_idx: 例: [0, 0, 0, 1, 2, 2], 1つ目のnetにはcontainer3つ, 2つ目のnetにはcontainer1つ, 3つ目のnetにはcontainer2つ接続している
-	local -a container_net_idx=() container_branch=() container_labels=() container_ports=() container_status=() container_dns=()
-
-
-	# ----- 各ネットワークの情報を取得、表示 -----
-  while IFS=$'\t' read -r net driver scope; do
-		# 空行の場合はスキップ
-    [[ -z "$net" ]] && continue
-
-		# 処理しているネットワークのインデックス, net_names+=("$net")されていくのでインクリメントされていく
-		local idx=${#net_names[@]}
-		# ----- 表示用変数に追加 -----
-		# (): 配列, +=("$net"): "$net"を要素とする配列を追加する
-    net_names+=("$net")
-    net_drivers+=("$driver")
-    net_scopes+=("$scope")
-		# --------------------------
-
-		# ----- ネットワークに接続されているコンテナの情報を取得 -----
-		# mapfile: 標準入力を一行ずつ読んで配列に格納, -t: trim: 各行末の改行\nを削除, 今回は containers に格納
-		# sed: stream editor: ^$: 空行, /d: 削除 -> 空行を削除
-		# sort: 行をソート, LC_ALL=C: localeをCに設定することでASCII順にソート
-    mapfile -t containers < <(docker network inspect "$net" --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' \
-        | sed '/^$/d' | LC_ALL=C sort
-    )
-		# -------------------------------------------------------
-
-		# コンテナが無い場合はスキップ
-		[[ ${#containers[@]} -eq 0 ]] && continue
-
-		# ----- ネットワークに接続されているコンテナの情報を表示 -----
-		# containers[@]: 配列の全要素を参照
-		# #: length
-		# ${#containers[@]}: containers配列の要素数を取得
-    local n=${#containers[@]}
-		local i=0
-    for container in "${containers[@]}"; do
-			# $(()): 算術展開: 整数の式として評価, 結果を文字列として展開
-      i=$((i + 1))
-      local branch='├'
-      (( i == n )) && branch='└'	# i == nなら└
-
-      local ports="${c_ports[$container]:-"-"}"
-      local status="${c_status[$container]:-"not running"}"
-			# +: パラメータが設定されていれば右側の値を返す、されていなければ空文字を返す
-			# -z: 文字列が空なら真
-			# -> ポートが設定されていなければ - を表示
-      [[ -z "${c_ports[$container]+x}" ]] && ports="-"
-
-			# ----- DNS名を取得 -----
-      local dns
-			# $container, $net: 引数
-			# 関数の結果(標準出力)をコマンド置換(文字列)で受け取り、dns に代入
-      dns=$(inspect_dns_for_net "$container" "$net")
-      dns=${dns:-"-"}
-			# ----------------------
-
-			# ----- 表示用変数に追加 ----- 
-			container_net_idx+=("$idx")
-			container_branch+=("$branch")
-			container_labels+=("$container")
-			container_ports+=("$ports")
-			container_status+=("$status")
-			container_dns+=("$dns")
-			# --------------------------
-    done
-	
-  done < <(docker network ls --format '{{.Name}}{{"\t"}}{{.Driver}}{{"\t"}}{{.Scope}}')
-	# ---------------------------------------------------------
-
-	# ネットワークがない場合は終了
-	[[ ${#net_names[@]} -eq 0 ]] && return 0
+	# ネットワークが無い場合は終了
+	[[ ${#network_names[@]} -eq 0 ]] && return 0
 
 	# ----- 表示用変数の最大幅を取得 -----
-	local w_net=0 w_drv=0 w_scope=0 w_label=0 w_ports=0 w_status=0 w_dns=0
+	local w_net=0 w_drv=0 w_scope=0 w_container=0 w_ports=0 w_status=0
 	local s
-  for s in "${net_names[@]}";   do (( ${#s} > w_net   )) && w_net=${#s};   done
-  for s in "${net_drivers[@]}"; do (( ${#s} > w_drv   )) && w_drv=${#s};   done
-  for s in "${net_scopes[@]}";  do (( ${#s} > w_scope )) && w_scope=${#s};  done
-  for s in "${container_labels[@]}";  do (( ${#s} > w_label  )) && w_label=${#s};  done
+  for s in "${network_names[@]}";   do (( ${#s} > w_net   )) && w_net=${#s};   done
+  for s in "${network_drivers[@]}"; do (( ${#s} > w_drv   )) && w_drv=${#s};   done
+  for s in "${network_scopes[@]}";  do (( ${#s} > w_scope )) && w_scope=${#s};  done
+  for s in "${container_names[@]}";  do (( ${#s} > w_container  )) && w_container=${#s};  done
   for s in "${container_ports[@]}";   do (( ${#s} > w_ports  )) && w_ports=${#s};  done
   for s in "${container_status[@]}";  do (( ${#s} > w_status )) && w_status=${#s}; done
-  for s in "${container_dns[@]}";     do (( ${#s} > w_dns    )) && w_dns=${#s};    done
 	# ---------------------------------
 
-	# ----- 表示 -----
+	# ------------- 表示 ---------------
 	# header
 	printf '%-*s  %-*s  %-*s\n' "$w_net" "NETWORK" "$w_drv" "DRIVER" "$w_scope" "SCOPE"
-	printf '%s %-*s  %-*s  %-*s  %-*s\n' "└" "$w_label" "CONTAINER" "$w_ports" "PORTS" "$w_status" "STATUS" "$w_dns" "DNS"
+	printf '%s %-*s  %-*s  %-*s  %s\n' "└" "$w_container" "CONTAINER" "$w_ports" "PORTS" "$w_status" "STATUS" "DNS"
   
-	local net_idx
-	local container_idx=0	# コンテナ表示用インデックス
-	# !: index: インデックス, ${!net_names[@]}: net_names配列のインデックスを展開
-  for net_idx in "${!net_names[@]}"; do
+	for network in "${network_names[@]}"; do
 		# ネットワーク表示
-    printf '%-*s  %-*s  %-*s\n' \
-		"$w_net" "${net_names[$net_idx]}" \
-		"$w_drv" "${net_drivers[$net_idx]}" \
-		"$w_scope" "${net_scopes[$net_idx]}"
-    
-		# そのネットワークのコンテナ表示
-		local has_container=0
-		while (( container_idx < ${#container_net_idx[@]} )) && [[ ${container_net_idx[$container_idx]} -eq $net_idx ]]; do
-      printf '%s %-*s  %-*s  %-*s  %s\n' \
-        "${container_branch[$container_idx]}" \
-        "$w_label" "${container_labels[$container_idx]}" \
-        "$w_ports" "${container_ports[$container_idx]}" \
-        "$w_status" "${container_status[$container_idx]}" \
-        "${container_dns[$container_idx]}"
+		printf '%-*s  %-*s  %-*s\n' \
+			"$w_net" "$network" \
+			"$w_drv" "${network_drivers[$network]}" \
+			"$w_scope" "${network_scopes[$network]}"
 
-			has_container=1
-      container_idx=$((container_idx + 1))
-    done
-    if (( has_container )); then
-      printf '\n'
-    fi
-  done
+		# そのネットワークのコンテナ表示
+		# -a: assign words to array: 分割した単語を配列に代入
+		while IFS=$'\t' read -ra containers; do
+			for container in "${containers[@]}"; do
+				local branch="├"
+				# 最後の要素の場合は└
+				[[ "$container" == "${containers[-1]}" ]] && branch="└"
+
+				# コンテナ表示
+				printf '%s %-*s  %-*s  %-*s  %s\n' \
+					"$branch" \
+					"$w_container" "$container" \
+					"$w_ports" "${container_ports[$container]:-}" \
+					"$w_status" "${container_status[$container]:-}" \
+					"${container_dns["${network}|${container}"]:-}"
+			done
+		done  <<< "${network_containers[$network]:-}"
+	done
 }
 
 show_netmap
