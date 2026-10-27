@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+
+# -e: err exit: エラーが発生したらスクリプトを終了
+# -u: nounset: 未定義の変数を使用したらエラー
+# -o pipefail: option pipefail: パイプライン全体の終了コードが、途中で失敗したコマンドの終了コードとなる。デフォルトは最後のコマンドの終了コード
+set -euo pipefail
+
+SCHEMA_VERSION="0.1.0"
+VENDOR="tipsy"
+VERSION="0.0.1"
+SHORT_DESCRIPTION="Docker network map"
+URL=""
+
+# ./script.sh start をすると $1 = start となる
+# ${1:-}: -: デフォルト値に空文字列を指定 -u指定のため未指定時でもちゃんと動くように
+case "${1:-}" in
+  docker-cli-plugin-metadata)
+		# 'EOF': ''によって中身が展開されない
+    cat <<EOF
+{"SchemaVersion":"${SCHEMA_VERSION}","Vendor":"${VENDOR}","Version":"${VERSION}","ShortDescription":"${SHORT_DESCRIPTION}","URL":"${URL}"}
+EOF
+    ;; # caseの終わり
+  *)
+    echo "test"
+    ;;
+esac
