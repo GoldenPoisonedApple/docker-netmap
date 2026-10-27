@@ -1,5 +1,6 @@
 # docker netmap
-docker のネットワーク情報を表示するスクリプト
+docker のネットワーク情報を表示するスクリプト `docker netmap`
+
 **NOT VIBE CODING!**
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
@@ -26,7 +27,29 @@ worker_default           bridge              local                      0/1 up
 ```
 
 ## Installation
+ユーザ空間のdocker cli plugins の規定フォルダに配置します。
+```bash
+mkdir -p ~/.docker/cli-plugins
+curl -fsSL -o ~/.docker/cli-plugins/docker-netmap https://github.com/GoldenPoisonedApple/docker-netmap/releases/latest/download/docker-netmap
+chmod +x ~/.docker/cli-plugins/docker-netmap
 
+docker netmap --version
+```
+
+- リポジトリをcloneした場合
+```bash
+make deploy
+```
+
+## Uninstallation
+```bash
+rm ~/.docker/cli-plugins/docker-netmap
+```
+
+- リポジトリをcloneした場合
+```bash
+make uninstall
+```
 
 ## Specification
 - docker cli plugins の機能により実装していますが、[参考](https://github.com/docker/docs/issues/10852)より既に推奨されていない機能のため、動かなくなる可能性が十分にあります。
